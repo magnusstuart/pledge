@@ -21,7 +21,6 @@ use tokio::{
     io::AsyncReadExt,
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
-use uuid::serde::compact;
 
 #[derive(Debug)]
 pub(super) enum WireProtocolStates {
@@ -51,10 +50,15 @@ pub(super) struct ProtocolState {
     pub prepared_statements: HashMap<String, PreparedStatement>,
     pub portals: HashMap<String, Portal>,
 }
+pub(super) struct PreparedStatementState {
+    pub stmt: PreparedStatement,
+    pub backend_knows_about_it: bool,
+}
 
 pub(super) struct ClientState {
     pub app_state: AppState,
-    pub prepared_statements: HashMap<String, PreparedStatement>,
+    /// The bool represents whether the backend know about this statement
+    pub prepared_statements: HashMap<String, PreparedStatementState>,
     pub portals: HashMap<String, Portal>,
     pub framer: MessageFramer,
     pub buffer_state: BufferState,
@@ -89,9 +93,9 @@ pub(super) struct ScratchEntry {
 
 pub(super) struct Scratch {
     pub entries: Vec<ScratchEntry>,
-    pub parses_by_stmt_name: HashMap<String, ParseMessageContent>,
-    pub binds_by_portal_name: HashMap<String, BindMessageContent>,
-    pub describes_by_name: HashMap<String, DescribeMessageContent>,
+    pub parses_by_stmt_name: HashMap<String, (usize, ParseMessageContent)>,
+    pub binds_by_portal_name: HashMap<String, (usize, BindMessageContent)>,
+    pub describes_by_name: HashMap<String, (usize, DescribeMessageContent)>,
 }
 
 impl Scratch {

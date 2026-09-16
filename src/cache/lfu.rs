@@ -171,7 +171,7 @@ impl Entry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct CachedResponse {
     pub(crate) param_desc: Option<Vec<u8>>,
     pub(crate) row_desc: Option<Vec<u8>>,

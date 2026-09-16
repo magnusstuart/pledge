@@ -103,7 +103,17 @@ fn test_insert_and_get() {
     );
 
     let result = inner.get("key1");
-    assert_eq!(result, (Some(b"value1".to_vec()), false));
+    assert_eq!(
+        result,
+        (
+            Some(Arc::new(CachedResponse {
+                data: b"value1".to_vec(),
+                row_desc: None,
+                param_desc: None
+            })),
+            false
+        )
+    );
 }
 
 #[test]

@@ -479,3 +479,53 @@ impl Decode for Execute {
         Ok(parsed_message)
     }
 }
+
+#[derive(Clone)]
+pub(super) enum CloseMessageContentTarget {
+    PreparedStatement,
+    Portal,
+}
+impl TryFrom<u8> for CloseMessageContentTarget {
+    type Error = ByteReaderError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            b'S' => Ok(Self::PreparedStatement),
+            b'P' => Ok(Self::Portal),
+            _ => Err(ByteReaderError {
+                kind: ByteReaderErrorKind::ProtocolError,
+                message: "target byte must be 'S' or 'P'".to_string(),
+            }),
+        }
+    }
+}
+impl Display for CloseMessageContentTarget {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PreparedStatement => write!(f, "PreparedStatement"),
+            Self::Portal => write!(f, "Portal"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct CloseMessageContent {
+    pub(super) target: CloseMessageContentTarget,
+    pub(super) name: String,
+}
+
+pub(super) struct Close {
+    pub(super) bytes: Vec<u8>,
+}
+impl Decode for Close {
+    type Output = CloseMessageContent;
+    fn decode(&self) -> Result<CloseMessageContent, ByteReaderError> {
+        let mut reader = ByteReader::new(self.bytes.to_vec(), 0);
+        let target: CloseMessageContentTarget = reader.read_u8()?.try_into()?;
+        let name = reader.read_cstring()?;
+
+        let parsed_message = CloseMessageContent { target, name };
+
+        Ok(parsed_message)
+    }
+}

@@ -101,7 +101,7 @@ pub(super) async fn find_command_slot_messages(
         .framer
         .add_buffer(client_state.buffer_state.pending_data());
 
-    while let Ok(Some(msg)) = client_state.framer.next_message() {
+    'next_message_loop: while let Ok(Some(msg)) = client_state.framer.next_message() {
         let type_byte = msg[0];
         match type_byte {
             b'Q' => {
@@ -187,14 +187,14 @@ pub(super) async fn find_command_slot_messages(
                 });
             }
             b'X' => {
-                todo!(
-                    "figure out what i should do in the case of terminate, do i finish the so far processed messages, or do i just stop the connection ASAP?"
-                );
-                client_state.scratch.entries.push(ScratchEntry {
-                    bytes: msg.clone(),
-                    kind: ScratchKind::Terminate,
-                    execute: None,
+                // Terminate means stop immediately
+                client_state.scratch.reset();
+                cycles.push(Cycle {
+                    slots: vec![CommandSlot::Passthrough(CommandSlotPassthrough {
+                        bytes: msg.clone(),
+                    })],
                 });
+                break 'next_message_loop;
             }
             _ => {
                 return Err(Error::new(
@@ -204,7 +204,6 @@ pub(super) async fn find_command_slot_messages(
             }
         }
     }
-    println!("returning the constructed cycles");
     Ok(cycles)
 }
 
@@ -300,7 +299,6 @@ fn resolve_execute_chain(client_state: &ClientState, portal_name: &str) -> Optio
     let mut paired_messages: PairedMessages = PairedMessages {
         parse_entry: None,
         bind_entry: None,
-        // descibe_entry: None,
         query: String::new(),
     };
 
@@ -423,14 +421,23 @@ async fn sync_message_handle_entries(
                     }
                 };
 
-                let cache_plan = match find_template(&execute_content, client_state) {
-                    Some(cache_plan) => cache_plan,
-                    None => {
+                let cache_plan = {
+                    if execute_content.rows_to_return_limit == 0 {
+                        match find_template(&execute_content, client_state) {
+                            Some(cache_plan) => cache_plan,
+                            None => {
+                                command_slots[index] =
+                                    Some(CommandSlot::Passthrough(CommandSlotPassthrough {
+                                        bytes: entry.bytes.clone(),
+                                    }));
+                                continue;
+                            }
+                        }
+                    } else {
                         command_slots[index] =
                             Some(CommandSlot::Passthrough(CommandSlotPassthrough {
                                 bytes: entry.bytes.clone(),
                             }));
-
                         continue;
                     }
                 };
@@ -439,13 +446,23 @@ async fn sync_message_handle_entries(
 
                 match resolve_execute_chain(client_state, &execute_content.name) {
                     Some(paired_messages) => {
-                        if let Some(cached) = cache_response {
-                            if let Some((describe_index, describe)) = client_state
+                        // We do this check for the describe_kind now, as we need it to see whether
+                        // the data we (possibly) have cached is complete/contains what is needed
+                        if let Some((_, describe)) = client_state
+                            .scratch
+                            .describes_by_name
+                            .get(&execute_content.name)
+                        {
+                            describe_kind = describe_message(describe);
+                        }
+                        if let Some(cached) = cache_response
+                            && cache_data_can_satisfy(&cached, &describe_kind)
+                        {
+                            if let Some((describe_index, _)) = client_state
                                 .scratch
                                 .describes_by_name
                                 .get(&execute_content.name)
                             {
-                                describe_kind = describe_message(describe);
                                 command_slots[*describe_index] =
                                     Some(CommandSlot::Skip(CommandSlotSkip {
                                         bytes: client_state
@@ -489,12 +506,11 @@ async fn sync_message_handle_entries(
                                     }))
                             }
                         } else {
-                            if let Some((describe_index, describe)) = client_state
+                            if let Some((describe_index, _)) = client_state
                                 .scratch
                                 .describes_by_name
                                 .get(&execute_content.name)
                             {
-                                describe_kind = describe_message(describe);
                                 command_slots[*describe_index] =
                                     Some(CommandSlot::Passthrough(CommandSlotPassthrough {
                                         bytes: client_state
@@ -541,9 +557,12 @@ async fn sync_message_handle_entries(
                         }
                     }
                     None => {
-                        todo!(
-                            "This is an edge case that shouldn't really happen, BUT we continue by just sending the bytes onward RAW."
-                        );
+                        // TODO! add proper logging when this happens, as it shouldn't really be
+                        // able to happen
+                        command_slots[index] =
+                            Some(CommandSlot::Passthrough(CommandSlotPassthrough {
+                                bytes: entry.bytes.clone(),
+                            }));
                     }
                 }
             }

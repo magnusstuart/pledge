@@ -4,7 +4,10 @@ use crate::{
     cache::lfu::CachedResponse,
     wire::{
         messages::DBMessageContent,
-        types::{CommandSlotCapture, Cycle, DescribeKind},
+        types::{
+            CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay, CommandSlotSkip, Cycle,
+            DescribeKind,
+        },
     },
 };
 
@@ -24,11 +27,29 @@ pub(super) async fn handle_client(
     db_write: &OwnedWriteHalf,
     tx: &Sender<Vec<Cycle>>,
 ) {
-    super::stream_try_write(&db_write, client_state.buffer_state.pending_data()).await;
+    // super::stream_try_write(db_write, client_state.buffer_state.pending_data()).await;
 
     match super::cache_planner::find_command_slot_messages(client_state).await {
         Ok(cycles) => {
+            for cycle in &cycles {
+                for slot in &cycle.slots {
+                    match slot {
+                        CommandSlot::Passthrough(CommandSlotPassthrough { bytes })
+                        | CommandSlot::Capture(CommandSlotCapture { bytes, .. }) => {
+                            super::stream_try_write(db_write, bytes).await;
+                        }
+                        _ => {}
+                    }
+                }
+                if cycle.synthesize_sync {
+                    // Important that we synthesize the Sync message if cycle exists because of a
+                    // Sync message
+                    super::stream_try_write(db_write, &[b'S', 0, 0, 0, 4]).await;
+                }
+            }
+
             if let Err(err) = tx.send(cycles).await {
+                // TODO! Either add a retry, or just terminate program
                 eprintln!("failed to send command slots: {err}");
             }
         }
@@ -48,6 +69,7 @@ pub(super) async fn handle_db(
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
 ) -> Result<(), String> {
+    println!("got cycles: {:?}", cycles);
     'read_loop: loop {
         let _ = db_state.buffer_state.read_from_stream(db_read).await;
         super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
@@ -63,14 +85,14 @@ pub(super) async fn handle_db(
             }
         }
     }
-    return Ok(());
+    Ok(())
 }
 
 pub(super) async fn handle_db_read(
     db_state: &mut DBState,
     client_write: &OwnedWriteHalf,
 ) -> Result<(), String> {
-    super::stream_try_write(&client_write, db_state.buffer_state.pending_data()).await;
+    super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
     if let Err(err) = db_state
         .buffer_state
         .consume(&db_state.buffer_state.pending_data_len())

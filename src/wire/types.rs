@@ -213,17 +213,18 @@ pub(super) struct Portal {
     pub result_column_format_codes: Vec<i16>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum ProtocolMode {
     Simple,
     Extended,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct Cycle {
     pub slots: Vec<CommandSlot>,
+    pub synthesize_sync: bool,
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum CommandSlot {
     Passthrough(CommandSlotPassthrough), // not configured: clean passthrough to the db
     Skip(CommandSlotSkip),
@@ -231,17 +232,17 @@ pub(super) enum CommandSlot {
     Capture(CommandSlotCapture), // cache miss: next DB response belongs to this key
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct CommandSlotPassthrough {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct CommandSlotSkip {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct CommandSlotReplay {
     pub key: String,
     pub data: Arc<CachedResponse>,
@@ -250,8 +251,9 @@ pub(super) struct CommandSlotReplay {
     pub query: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct CommandSlotCapture {
+    pub bytes: Vec<u8>,
     pub key: String,
     pub describe_kind: DescribeKind,
     pub protocol_mode: ProtocolMode,
@@ -259,7 +261,7 @@ pub(super) struct CommandSlotCapture {
     pub ttl: Duration,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum DescribeKind {
     None,
     Portal,

@@ -96,7 +96,6 @@ pub(super) async fn find_command_slot_messages(
     client_state: &mut ClientState,
 ) -> Result<Vec<Cycle>, Error> {
     let mut cycles: Vec<Cycle> = Vec::new();
-    // let mut command_slots: Vec<CommandSlot> = Vec::new();
     client_state
         .framer
         .add_buffer(client_state.buffer_state.pending_data());
@@ -120,6 +119,7 @@ pub(super) async fn find_command_slot_messages(
                             slots: vec![CommandSlot::Passthrough(CommandSlotPassthrough {
                                 bytes: msg,
                             })],
+                            synthesize_sync: false,
                         });
                         continue;
                     }
@@ -133,15 +133,18 @@ pub(super) async fn find_command_slot_messages(
                             query: query_content.query,
                             key: cache_plan.key,
                         })],
+                        synthesize_sync: false,
                     }),
                     None => cycles.push(Cycle {
                         slots: vec![CommandSlot::Capture(CommandSlotCapture {
+                            bytes: msg,
                             key: cache_plan.key,
                             describe_kind: DescribeKind::None,
                             protocol_mode: ProtocolMode::Simple,
                             query: query_content.query,
                             ttl: cache_plan.ttl,
                         })],
+                        synthesize_sync: false,
                     }),
                 };
             }
@@ -176,6 +179,7 @@ pub(super) async fn find_command_slot_messages(
             b'S' => {
                 cycles.push(Cycle {
                     slots: sync_message_handle_entries(client_state).await?,
+                    synthesize_sync: true,
                 });
                 client_state.scratch.reset();
             }
@@ -188,11 +192,13 @@ pub(super) async fn find_command_slot_messages(
             }
             b'X' => {
                 // Terminate means stop immediately
+                println!("terminated session");
                 client_state.scratch.reset();
                 cycles.push(Cycle {
                     slots: vec![CommandSlot::Passthrough(CommandSlotPassthrough {
                         bytes: msg.clone(),
                     })],
+                    synthesize_sync: false,
                 });
                 break 'next_message_loop;
             }
@@ -523,6 +529,7 @@ async fn sync_message_handle_entries(
                                     }))
                             }
                             command_slots[index] = Some(CommandSlot::Capture(CommandSlotCapture {
+                                bytes: entry.bytes.clone(),
                                 key: cache_plan.key,
                                 describe_kind,
                                 protocol_mode: ProtocolMode::Extended,

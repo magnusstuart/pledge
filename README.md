@@ -71,23 +71,6 @@ sql = "SELECT u.email, COUNT(*) as match_count, MAX(p.created_at) as latest_matc
 
 ```
 
-## Supported Data Types
-As of right now, pledge supports the following Postgres data types:
-
-1. BOOL
-2. “CHAR”
-3. SMALLINT, SMALLSERIAL, INT2
-4. INT, SERIAL, INT4
-5. BIGINT, BIGSERIAL, INT8
-6. REAL, FLOAT4
-7. DOUBLE PRECISION, FLOAT8
-8. VARCHAR, CHAR(N), TEXT, NAME, CITEXT
-9. BYTEA
-10. VOID
-11. NUMERIC
-12. TIMESTAMP, TIMESTAMPTZ, DATE, TIME
-13. UUID
-
 ## Features/Roadmap
 
 ### Implemented

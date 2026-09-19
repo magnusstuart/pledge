@@ -1,11 +1,11 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::database::value::PostcardValue;
 use crate::metrics::{CACHE_HITS, CACHE_MISSES, TOTAL_QUERY_DURATION, register_cache_hit};
 use crate::server::state::AppState;
 use crate::{cache::store::cache_key, database::conversion};
 use axum::Json;
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use sqlx::{Column, PgPool, Row};
@@ -35,54 +35,55 @@ pub async fn query_handler(
     if matched_template.is_some() {
         if let Some(cached_result) = state.cache.get(&key) {
             CACHE_HITS.inc();
-            let query_response =
-                postcard::from_bytes::<QueryResponse>(&cached_result).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Postcard error: {}", e),
-                    )
-                })?;
-            let json_value = response_to_json(&query_response);
-            let json_bytes = serde_json::to_vec(&json_value)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let response = Response::builder()
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(json_bytes.into())
-                .unwrap();
+            // let query_response =
+            //     postcard::from_bytes::<QueryResponse>(&cached_result).map_err(|e| {
+            //         (
+            //             StatusCode::INTERNAL_SERVER_ERROR,
+            //             format!("Postcard error: {}", e),
+            //         )
+            //     })?;
+            // let json_value = response_to_json(&query_response);
+            // let json_bytes = serde_json::to_vec(&json_value)
+            //     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            // let response = Response::builder()
+            //     .header(header::CONTENT_TYPE, "application/json")
+            //     .body(json_bytes.into())
+            //     .unwrap();
             println!("✓ CACHE HIT (key: {})", &key[0..8]);
             TOTAL_QUERY_DURATION.observe(start.elapsed().as_secs_f64());
             register_cache_hit(start.elapsed());
             println!("Cache hit duration: {}", start.elapsed().as_secs_f64());
-            return Ok(response);
+            //return Ok(response);
         }
     }
 
     // Cache miss path
     CACHE_MISSES.inc();
     println!("x CACHE MISS (key: {})", &key[0..8]);
-    let rows = execute_query(&state.pool, &body.sql, &body.params).await?;
+    //let rows = execute_query(&state.pool, &body.sql, &body.params).await?;
 
-    let response = QueryResponse { rows };
-    let cache_bytes = postcard::to_allocvec(&response)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let json_value = response_to_json(&response);
-    let json_bytes = serde_json::to_vec(&json_value)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    //let response = QueryResponse { rows };
+    //let cache_bytes = postcard::to_allocvec(&response)
+    //    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // let json_value = response_to_json(&response);
+    // let json_bytes = serde_json::to_vec(&json_value)
+    //     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if let Some(template) = matched_template {
-        let expiration = match template.ttl {
-            Some(ttl) => Instant::now() + Duration::from_secs(ttl),
-            None => Instant::now() + Duration::from_secs(state.global_ttl),
-        };
-        println!("[_] Stored in cache: {}", key);
-        state.cache.insert(key, cache_bytes, expiration);
-    }
+    // if let Some(template) = matched_template {
+    //     let expiration = match template.ttl {
+    //         Some(ttl) => Instant::now() + Duration::from_secs(ttl),
+    //         None => Instant::now() + Duration::from_secs(state.global_ttl),
+    //     };
+    //     println!("[_] Stored in cache: {}", key);
+    //     state.cache.insert(key, cache_bytes, expiration);
+    // }
 
     TOTAL_QUERY_DURATION.observe(start.elapsed().as_secs_f64());
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(json_bytes.into())
-        .unwrap())
+    // Ok(Response::builder()
+    //     .header(header::CONTENT_TYPE, "application/json")
+    //     .body(json_bytes.into())
+    //     .unwrap())
+    Err((StatusCode::INTERNAL_SERVER_ERROR, "asd".to_string()))
 }
 
 async fn execute_query(

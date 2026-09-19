@@ -11,9 +11,14 @@ pub struct Config {
     pub server: ServerConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct DatabaseConfig {
     pub url: String,
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    pub password: String,
+    pub database: String,
 }
 
 pub struct CacheSettings {

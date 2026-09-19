@@ -1,3 +1,4 @@
+use super::lfu::CachedResponse;
 use super::lfu::{Cache, CacheInner, Entry};
 use std::{
     sync::{Arc, atomic::AtomicU64},
@@ -6,15 +7,36 @@ use std::{
 };
 
 #[cfg(test)]
+fn helper_get_data_length(entry: &Entry) -> u64 {
+    let data_length: u64 = {
+        let row_desc = match entry.data.row_desc.as_ref() {
+            Some(value) => value,
+            None => &Vec::new(),
+        };
+        let param_desc = match entry.data.param_desc.as_ref() {
+            Some(value) => value,
+            None => &Vec::new(),
+        };
+        entry.data.data.len() as u64 + row_desc.len() as u64 + param_desc.len() as u64
+    };
+    data_length
+}
+
+#[cfg(test)]
 fn helper_create_1mb_entry_data(key: &str) -> Vec<u8> {
     let one_mb_in_bytes: u64 = 1_048_576;
 
     let entry = Entry {
-        data: vec![1],
+        data: Arc::new(CachedResponse {
+            data: vec![1],
+            row_desc: None,
+            param_desc: None,
+        }),
         counter: AtomicU64::new(0),
         expires_at: Instant::now(),
     };
-    let overhead = entry.get_size(key) - entry.data.len() as u64;
+
+    let overhead = entry.get_size(key) - helper_get_data_length(&entry);
 
     helper_create_vector(one_mb_in_bytes - overhead)
 }
@@ -22,16 +44,22 @@ fn helper_create_1mb_entry_data(key: &str) -> Vec<u8> {
 #[cfg(test)]
 fn helper_create_custom_size_entry_data(key: &str, total_bytes_size: u64) -> Vec<u8> {
     let entry = Entry {
-        data: vec![1],
+        data: Arc::new(CachedResponse {
+            data: vec![1],
+            row_desc: None,
+            param_desc: None,
+        }),
         counter: AtomicU64::new(0),
         expires_at: Instant::now(),
     };
-    if (total_bytes_size as i64 - (entry.get_size(key) - entry.data.len() as u64) as i64) <= 0 {
+    if (total_bytes_size as i64 - (entry.get_size(key) - helper_get_data_length(&entry)) as i64)
+        <= 0
+    {
         panic!(
             "Total bytes size is lower than the overhead, not a bug in the code just one for the helper"
         );
     }
-    let overhead = entry.get_size(key) - entry.data.len() as u64;
+    let overhead = entry.get_size(key) - helper_get_data_length(&entry);
 
     helper_create_vector(total_bytes_size - overhead)
 }
@@ -42,7 +70,12 @@ fn helper_create_vector(size: u64) -> Vec<u8> {
 }
 
 #[cfg(test)]
-fn helper_insert_entry(key: &str, data: Vec<u8>, expires_in: u64, inner: &mut CacheInner) {
+fn helper_insert_entry(
+    key: &str,
+    data: Arc<CachedResponse>,
+    expires_in: u64,
+    inner: &mut CacheInner,
+) {
     inner.insert(
         key.to_string(),
         data,
@@ -61,12 +94,26 @@ fn test_insert_and_get() {
     let mut inner = CacheInner::new(10 * 1024 * 1024);
     inner.insert(
         "key1".to_string(),
-        b"value1".to_vec(),
+        Arc::new(CachedResponse {
+            data: b"value1".to_vec(),
+            param_desc: None,
+            row_desc: None,
+        }),
         Instant::now() + Duration::from_secs(60),
     );
 
     let result = inner.get("key1");
-    assert_eq!(result, (Some(b"value1".to_vec()), false));
+    assert_eq!(
+        result,
+        (
+            Some(Arc::new(CachedResponse {
+                data: b"value1".to_vec(),
+                row_desc: None,
+                param_desc: None
+            })),
+            false
+        )
+    );
 }
 
 #[test]

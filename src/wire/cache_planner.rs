@@ -179,6 +179,8 @@ pub(super) async fn find_command_slot_messages(
             b'S' => {
                 cycles.push(Cycle {
                     slots: sync_message_handle_entries(client_state).await?,
+                    // Important that we synthesize the Sync message if cycle exists because of a
+                    // Sync message
                     synthesize_sync: true,
                 });
                 client_state.scratch.reset();

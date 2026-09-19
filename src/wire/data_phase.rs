@@ -27,8 +27,6 @@ pub(super) async fn handle_client(
     db_write: &OwnedWriteHalf,
     tx: &Sender<Vec<Cycle>>,
 ) {
-    // super::stream_try_write(db_write, client_state.buffer_state.pending_data()).await;
-
     match super::cache_planner::find_command_slot_messages(client_state).await {
         Ok(cycles) => {
             for cycle in &cycles {
@@ -42,8 +40,6 @@ pub(super) async fn handle_client(
                     }
                 }
                 if cycle.synthesize_sync {
-                    // Important that we synthesize the Sync message if cycle exists because of a
-                    // Sync message
                     super::stream_try_write(db_write, &[b'S', 0, 0, 0, 4]).await;
                 }
             }
@@ -72,16 +68,26 @@ pub(super) async fn handle_db(
     println!("got cycles: {:?}", cycles);
     'read_loop: loop {
         let _ = db_state.buffer_state.read_from_stream(db_read).await;
-        super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
+
+        // super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
         db_state
             .framer
             .add_buffer(db_state.buffer_state.pending_data());
         let _ = db_state
             .buffer_state
             .consume(&db_state.buffer_state.pending_data_len());
+
         while let Ok(Some(msg)) = db_state.framer.next_message() {
-            if msg[0] == b'Z' {
-                break 'read_loop;
+            let type_byte = msg[0];
+            match type_byte {
+                // CommandComplete
+                b'C' => {
+                    println!("CommandComplete message: {:?}", msg);
+                }
+                b'Z' => {
+                    break 'read_loop;
+                }
+                _ => {}
             }
         }
     }
@@ -101,6 +107,15 @@ pub(super) async fn handle_db_read(
         return Err(err.to_string());
     }
     Ok(())
+}
+
+pub(super) fn cycle_contains_cache_interaction(cycle: Cycle) -> bool {
+    for slot in cycle.slots {
+        if let CommandSlot::Passthrough(_) | CommandSlot::Capture(_) = slot {
+            return true;
+        }
+    }
+    false
 }
 
 // pub(super) async fn handle_db_cache_command(

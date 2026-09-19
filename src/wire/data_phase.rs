@@ -65,6 +65,8 @@ pub(super) async fn handle_db(
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
 ) -> Result<(), String> {
+    let mut current_cycle: &Cycle = &cycles[0];
+    let mut cycle_stream: Vec<u8> = Vec::new();
     println!("got cycles: {:?}", cycles);
     'read_loop: loop {
         let _ = db_state.buffer_state.read_from_stream(db_read).await;
@@ -79,12 +81,16 @@ pub(super) async fn handle_db(
 
         while let Ok(Some(msg)) = db_state.framer.next_message() {
             let type_byte = msg[0];
+            cycle_stream.extend_from_slice(&msg);
             match type_byte {
-                // CommandComplete
-                b'C' => {
-                    println!("CommandComplete message: {:?}", msg);
+                // CommandComplete and ReadyForQuery
+                b'C' | b'Z' => {
+                    println!("CommandComplete or ReadyForQuery message: {:?}", msg);
+                    if cycle_contains_cache_interaction(current_cycle) {}
+                    break 'read_loop;
                 }
-                b'Z' => {
+                b'E' => {
+                    println!("ErrorResponse message: {:?}", msg);
                     break 'read_loop;
                 }
                 _ => {}
@@ -109,9 +115,9 @@ pub(super) async fn handle_db_read(
     Ok(())
 }
 
-pub(super) fn cycle_contains_cache_interaction(cycle: Cycle) -> bool {
-    for slot in cycle.slots {
-        if let CommandSlot::Passthrough(_) | CommandSlot::Capture(_) = slot {
+pub(super) fn cycle_contains_cache_interaction(cycle: &Cycle) -> bool {
+    for slot in &cycle.slots {
+        if let CommandSlot::Replay(_) | CommandSlot::Capture(_) = slot {
             return true;
         }
     }

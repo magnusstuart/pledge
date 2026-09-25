@@ -27,12 +27,12 @@ pub(super) async fn handle_client(
     db_write: &OwnedWriteHalf,
     tx: &Sender<Vec<Cycle>>,
 ) {
-    match super::cache_planner::find_command_slot_messages(client_state).await {
+    match super::cache_planner::find_command_slots(client_state).await {
         Ok(cycles) => {
             for cycle in &cycles {
                 for slot in &cycle.slots {
                     match slot {
-                        CommandSlot::Passthrough(CommandSlotPassthrough { bytes })
+                        CommandSlot::Passthrough(CommandSlotPassthrough { bytes, .. })
                         | CommandSlot::Capture(CommandSlotCapture { bytes, .. }) => {
                             super::stream_try_write(db_write, bytes).await;
                         }
@@ -65,37 +65,22 @@ pub(super) async fn handle_db(
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
 ) -> Result<(), String> {
-    let mut current_cycle: &Cycle = &cycles[0];
-    let mut cycle_stream: Vec<u8> = Vec::new();
     println!("got cycles: {:?}", cycles);
-    'read_loop: loop {
-        let _ = db_state.buffer_state.read_from_stream(db_read).await;
+    let _ = db_state.buffer_state.read_from_stream(db_read).await;
+    // super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
+    db_state
+        .framer
+        .add_buffer(db_state.buffer_state.pending_data());
+    let _ = db_state
+        .buffer_state
+        .consume(&db_state.buffer_state.pending_data_len());
 
-        // super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
-        db_state
-            .framer
-            .add_buffer(db_state.buffer_state.pending_data());
-        let _ = db_state
-            .buffer_state
-            .consume(&db_state.buffer_state.pending_data_len());
-
-        while let Ok(Some(msg)) = db_state.framer.next_message() {
-            let type_byte = msg[0];
-            cycle_stream.extend_from_slice(&msg);
-            match type_byte {
-                // CommandComplete and ReadyForQuery
-                b'C' | b'Z' => {
-                    println!("CommandComplete or ReadyForQuery message: {:?}", msg);
-                    if cycle_contains_cache_interaction(current_cycle) {}
-                    break 'read_loop;
-                }
-                b'E' => {
-                    println!("ErrorResponse message: {:?}", msg);
-                    break 'read_loop;
-                }
-                _ => {}
-            }
-        }
+    for cycle in &cycles {
+        super::stream_try_write(
+            client_write,
+            &super::cache_planner::handle_command_slot_messages(db_state, &cycle.slots)?,
+        )
+        .await;
     }
     Ok(())
 }
@@ -113,15 +98,6 @@ pub(super) async fn handle_db_read(
         return Err(err.to_string());
     }
     Ok(())
-}
-
-pub(super) fn cycle_contains_cache_interaction(cycle: &Cycle) -> bool {
-    for slot in &cycle.slots {
-        if let CommandSlot::Replay(_) | CommandSlot::Capture(_) = slot {
-            return true;
-        }
-    }
-    false
 }
 
 // pub(super) async fn handle_db_cache_command(

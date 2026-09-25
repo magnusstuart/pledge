@@ -13,11 +13,11 @@ use crate::{
     AppState,
     cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
     wire::{
-        Decode, MessageFramer, Scratch, data_phase,
+        DBState, Decode, MessageFramer, Scratch, data_phase,
         messages::{Close, CloseMessageContentTarget},
         types::{
             CachePlan, CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay,
-            CommandSlotSkip, Cycle, PreparedStatementState, ScratchEntry, ScratchKind,
+            CommandSlotSkip, Cycle, MessageKind, PreparedStatementState, ScratchEntry,
         },
     },
 };
@@ -92,7 +92,7 @@ pub(super) fn resolve_ttl(app_state: &AppState, query: &str) -> Option<Duration>
     Some(ttl)
 }
 
-pub(super) async fn find_command_slot_messages(
+pub(super) async fn find_command_slots(
     client_state: &mut ClientState,
 ) -> Result<Vec<Cycle>, Error> {
     let mut cycles: Vec<Cycle> = Vec::new();
@@ -118,6 +118,7 @@ pub(super) async fn find_command_slot_messages(
                         cycles.push(Cycle {
                             slots: vec![CommandSlot::Passthrough(CommandSlotPassthrough {
                                 bytes: msg,
+                                kind: MessageKind::Query,
                             })],
                             synthesize_sync: false,
                         });
@@ -151,28 +152,28 @@ pub(super) async fn find_command_slot_messages(
             b'P' => {
                 client_state.scratch.entries.push(ScratchEntry {
                     bytes: msg.clone(),
-                    kind: ScratchKind::Parse,
+                    kind: MessageKind::Parse,
                     execute: None,
                 });
             }
             b'B' => {
                 client_state.scratch.entries.push(ScratchEntry {
                     bytes: msg.clone(),
-                    kind: ScratchKind::Bind,
+                    kind: MessageKind::Bind,
                     execute: None,
                 });
             }
             b'D' => {
                 client_state.scratch.entries.push(ScratchEntry {
                     bytes: msg.clone(),
-                    kind: ScratchKind::Describe,
+                    kind: MessageKind::Describe,
                     execute: None,
                 });
             }
             b'E' => {
                 client_state.scratch.entries.push(ScratchEntry {
                     bytes: msg.clone(),
-                    kind: ScratchKind::Execute,
+                    kind: MessageKind::Execute,
                     execute: None,
                 });
             }
@@ -188,7 +189,7 @@ pub(super) async fn find_command_slot_messages(
             b'C' => {
                 client_state.scratch.entries.push(ScratchEntry {
                     bytes: msg.clone(),
-                    kind: ScratchKind::Close,
+                    kind: MessageKind::Close,
                     execute: None,
                 });
             }
@@ -199,6 +200,7 @@ pub(super) async fn find_command_slot_messages(
                 cycles.push(Cycle {
                     slots: vec![CommandSlot::Passthrough(CommandSlotPassthrough {
                         bytes: msg.clone(),
+                        kind: MessageKind::Terminate,
                     })],
                     synthesize_sync: false,
                 });
@@ -213,6 +215,121 @@ pub(super) async fn find_command_slot_messages(
         }
     }
     Ok(cycles)
+}
+
+pub(super) fn handle_command_slot_messages(
+    db_state: &mut DBState,
+    command_slots: &[CommandSlot],
+) -> Result<Vec<u8>, String> {
+    let mut complete_byte_stream = Vec::new();
+    let replays_and_captures = replays_and_captures_in_command_slots(command_slots);
+
+    if replays_and_captures.replays.is_empty() && replays_and_captures.captures.is_empty() {
+        while let Some(next_message) = db_state.framer.next_message()? {
+            complete_byte_stream.extend_from_slice(&next_message);
+        }
+        return Ok(complete_byte_stream);
+    }
+    // Maybe do something where i iterate the command_slots and while doing so i also look at the
+    // next_message in the framer, of course something should be done smart about the DataRow and
+    // alike, as they can take up A LOT of entries (as many as there was rows returned).
+
+    'capture_loop: for (index, capture) in replays_and_captures.captures {
+        let mut data_to_capture: Vec<u8> = Vec::new();
+        let mut param_desc_to_capture: Vec<u8> = Vec::new();
+        let mut row_desc_to_capture: Vec<u8> = Vec::new();
+
+        if capture.protocol_mode == ProtocolMode::Simple {
+            while let Some(next_message) = db_state.framer.next_message()? {
+                match next_message[0] {
+                    b'C' => {
+                        data_to_capture.extend_from_slice(&next_message);
+                        set_in_cache(
+                            &db_state.app_state,
+                            capture.ttl,
+                            &capture.key,
+                            CachedResponse {
+                                param_desc: None,
+                                row_desc: None,
+                                data: data_to_capture.clone(),
+                            },
+                        );
+                    }
+                    b'Z' => {
+                        complete_byte_stream.extend_from_slice(&data_to_capture);
+                        complete_byte_stream.extend_from_slice(&next_message);
+                        continue 'capture_loop;
+                    }
+                    _ => data_to_capture.extend_from_slice(&next_message),
+                }
+            }
+        } else {
+            while let Some(next_message) = db_state.framer.next_message()? {
+                match next_message[0] {
+                    b'C' => {
+                        data_to_capture.extend_from_slice(&next_message);
+                        set_in_cache(
+                            &db_state.app_state,
+                            capture.ttl,
+                            &capture.key,
+                            CachedResponse {
+                                param_desc: {
+                                    if capture.describe_kind == DescribeKind::Statement {
+                                        Some(param_desc_to_capture.clone())
+                                    } else {
+                                        None
+                                    }
+                                },
+                                row_desc: {
+                                    if capture.describe_kind != DescribeKind::None {
+                                        Some(row_desc_to_capture.clone())
+                                    } else {
+                                        None
+                                    }
+                                },
+                                data: data_to_capture.clone(),
+                            },
+                        );
+                    }
+                    b't' => param_desc_to_capture = next_message.clone(),
+                    b'T' => row_desc_to_capture = next_message.clone(),
+                    b'D' => data_to_capture.extend_from_slice(&next_message),
+                    b'Z' => {
+                        complete_byte_stream.extend_from_slice(&data_to_capture);
+                        complete_byte_stream.extend_from_slice(&next_message);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    for (index, command_slot) in command_slots.iter().enumerate() {
+        let next_message = db_state.framer.next_message()?;
+
+        match command_slot {
+            CommandSlot::Passthrough(CommandSlotPassthrough { bytes, kind }) => {}
+            CommandSlot::Skip(CommandSlotSkip { bytes, kind }) => {}
+            CommandSlot::Replay(CommandSlotReplay {
+                key,
+                data,
+                describe_kind,
+                protocol_mode,
+                query,
+            }) => {}
+            CommandSlot::Capture(CommandSlotCapture {
+                bytes,
+                key,
+                describe_kind,
+                protocol_mode,
+                query,
+                ttl,
+            }) => {}
+        }
+    }
+
+    Ok(complete_byte_stream)
 }
 
 /// Named prepared statements must be explicitly closed before they can be redefined by another Parse message,
@@ -353,7 +470,7 @@ async fn sync_message_handle_entries(
         vec![None; client_state.scratch.entries.len()];
     for (index, entry) in client_state.scratch.entries.clone().iter().enumerate() {
         match entry.kind {
-            ScratchKind::Parse => {
+            MessageKind::Parse => {
                 let body = entry.bytes[5..].to_vec();
                 let parse_content = match (Parse { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -367,7 +484,7 @@ async fn sync_message_handle_entries(
                     (index, parse_content),
                 );
             }
-            ScratchKind::Bind => {
+            MessageKind::Bind => {
                 let body = entry.bytes[5..].to_vec();
                 let bind_content = match (Bind { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -381,7 +498,7 @@ async fn sync_message_handle_entries(
                     .binds_by_portal_name
                     .insert(bind_content.portal_name.clone(), (index, bind_content));
             }
-            ScratchKind::Describe => {
+            MessageKind::Describe => {
                 let body = entry.bytes[5..].to_vec();
                 let describe_content = match (Describe { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -394,7 +511,7 @@ async fn sync_message_handle_entries(
                     .describes_by_name
                     .insert(describe_content.name.clone(), (index, describe_content));
             }
-            ScratchKind::Close => {
+            MessageKind::Close => {
                 let body = entry.bytes[5..].to_vec();
                 let close_content = match (Close { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -420,7 +537,7 @@ async fn sync_message_handle_entries(
                     }
                 };
             }
-            ScratchKind::Execute => {
+            MessageKind::Execute => {
                 let body = entry.bytes[5..].to_vec();
                 let execute_content = match (Execute { bytes: body }).decode() {
                     Ok(decoded) => decoded,
@@ -437,6 +554,7 @@ async fn sync_message_handle_entries(
                                 command_slots[index] =
                                     Some(CommandSlot::Passthrough(CommandSlotPassthrough {
                                         bytes: entry.bytes.clone(),
+                                        kind: entry.kind.clone(),
                                     }));
                                 continue;
                             }
@@ -445,6 +563,7 @@ async fn sync_message_handle_entries(
                         command_slots[index] =
                             Some(CommandSlot::Passthrough(CommandSlotPassthrough {
                                 bytes: entry.bytes.clone(),
+                                kind: entry.kind.clone(),
                             }));
                         continue;
                     }
@@ -470,16 +589,13 @@ async fn sync_message_handle_entries(
                                 .scratch
                                 .describes_by_name
                                 .get(&execute_content.name)
+                                && let Some(entry) =
+                                    client_state.scratch.entries.get(*describe_index)
                             {
                                 command_slots[*describe_index] =
                                     Some(CommandSlot::Skip(CommandSlotSkip {
-                                        bytes: client_state
-                                            .scratch
-                                            .entries
-                                            .get(*describe_index)
-                                            .unwrap()
-                                            .bytes
-                                            .clone(),
+                                        bytes: entry.bytes.clone(),
+                                        kind: MessageKind::Describe,
                                     }));
                             };
                             command_slots[index] = Some(CommandSlot::Replay(CommandSlotReplay {
@@ -489,28 +605,22 @@ async fn sync_message_handle_entries(
                                 query: paired_messages.query,
                                 data: cached,
                             }));
-                            if let Some(bind_index) = paired_messages.bind_entry {
+                            if let Some(bind_index) = paired_messages.bind_entry
+                                && let Some(entry) = client_state.scratch.entries.get(bind_index)
+                            {
                                 command_slots[bind_index] =
                                     Some(CommandSlot::Skip(CommandSlotSkip {
-                                        bytes: client_state
-                                            .scratch
-                                            .entries
-                                            .get(bind_index)
-                                            .unwrap()
-                                            .bytes
-                                            .clone(),
+                                        bytes: entry.bytes.clone(),
+                                        kind: MessageKind::Bind,
                                     }))
                             }
-                            if let Some(parse_index) = paired_messages.parse_entry {
+                            if let Some(parse_index) = paired_messages.parse_entry
+                                && let Some(entry) = client_state.scratch.entries.get(parse_index)
+                            {
                                 command_slots[parse_index] =
                                     Some(CommandSlot::Skip(CommandSlotSkip {
-                                        bytes: client_state
-                                            .scratch
-                                            .entries
-                                            .get(parse_index)
-                                            .unwrap()
-                                            .bytes
-                                            .clone(),
+                                        bytes: entry.bytes.clone(),
+                                        kind: MessageKind::Parse,
                                     }))
                             }
                         } else {
@@ -518,16 +628,13 @@ async fn sync_message_handle_entries(
                                 .scratch
                                 .describes_by_name
                                 .get(&execute_content.name)
+                                && let Some(entry) =
+                                    client_state.scratch.entries.get(*describe_index)
                             {
                                 command_slots[*describe_index] =
                                     Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                                        bytes: client_state
-                                            .scratch
-                                            .entries
-                                            .get(*describe_index)
-                                            .unwrap()
-                                            .bytes
-                                            .clone(),
+                                        bytes: entry.bytes.clone(),
+                                        kind: MessageKind::Describe,
                                     }))
                             }
                             command_slots[index] = Some(CommandSlot::Capture(CommandSlotCapture {
@@ -539,28 +646,22 @@ async fn sync_message_handle_entries(
                                 ttl: cache_plan.ttl,
                             }));
 
-                            if let Some(bind_index) = paired_messages.bind_entry {
+                            if let Some(bind_index) = paired_messages.bind_entry
+                                && let Some(entry) = client_state.scratch.entries.get(bind_index)
+                            {
                                 command_slots[bind_index] =
                                     Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                                        bytes: client_state
-                                            .scratch
-                                            .entries
-                                            .get(bind_index)
-                                            .unwrap()
-                                            .bytes
-                                            .clone(),
+                                        bytes: entry.bytes.clone(),
+                                        kind: MessageKind::Bind,
                                     }))
                             }
-                            if let Some(parse_index) = paired_messages.parse_entry {
+                            if let Some(parse_index) = paired_messages.parse_entry
+                                && let Some(entry) = client_state.scratch.entries.get(parse_index)
+                            {
                                 command_slots[parse_index] =
                                     Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                                        bytes: client_state
-                                            .scratch
-                                            .entries
-                                            .get(parse_index)
-                                            .unwrap()
-                                            .bytes
-                                            .clone(),
+                                        bytes: entry.bytes.clone(),
+                                        kind: MessageKind::Parse,
                                     }))
                             }
                         }
@@ -571,6 +672,7 @@ async fn sync_message_handle_entries(
                         command_slots[index] =
                             Some(CommandSlot::Passthrough(CommandSlotPassthrough {
                                 bytes: entry.bytes.clone(),
+                                kind: entry.kind.clone(),
                             }));
                     }
                 }
@@ -580,18 +682,79 @@ async fn sync_message_handle_entries(
     }
 
     for (index, entry) in command_slots.iter_mut().enumerate() {
-        if entry.is_none() {
+        if entry.is_none()
+            && let Some(scratch_entry) = client_state.scratch.entries.get(index)
+        {
             *entry = Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                bytes: client_state
-                    .scratch
-                    .entries
-                    .get(index)
-                    .unwrap()
-                    .bytes
-                    .clone(),
+                bytes: scratch_entry.bytes.clone(),
+                kind: scratch_entry.kind.clone(),
             }));
         }
     }
 
     Ok(command_slots.into_iter().flatten().collect())
+}
+
+struct ReplaysAndCaptures {
+    replays: Vec<(usize, CommandSlotReplay)>,
+    captures: Vec<(usize, CommandSlotCapture)>,
+}
+
+fn replays_and_captures_in_command_slots(command_slots: &[CommandSlot]) -> ReplaysAndCaptures {
+    let mut replays_and_captures = ReplaysAndCaptures {
+        replays: Vec::new(),
+        captures: Vec::new(),
+    };
+
+    for (index, command_slot) in command_slots.iter().enumerate() {
+        if let CommandSlot::Replay(replay) = command_slot {
+            replays_and_captures.replays.push((index, replay.clone()))
+        }
+        if let CommandSlot::Capture(capture) = command_slot {
+            replays_and_captures.captures.push((index, capture.clone()))
+        }
+    }
+
+    replays_and_captures
+}
+
+pub(super) fn command_slots_contains_replay_or_capture(command_slots: &[CommandSlot]) -> bool {
+    for command_slot in command_slots {
+        if let CommandSlot::Replay(_) | CommandSlot::Capture(_) = command_slot {
+            return true;
+        }
+    }
+    false
+}
+
+pub(super) fn cycle_contains_replay_and_capture(cycle: &Cycle) -> bool {
+    let mut has_replay = false;
+    let mut has_capture = false;
+    for slot in &cycle.slots {
+        if let CommandSlot::Replay(_) = slot {
+            has_replay = true;
+        }
+        if let CommandSlot::Capture(_) = slot {
+            has_capture = true;
+        }
+    }
+    has_replay && has_capture
+}
+
+pub(super) fn cycle_contains_replay(cycle: &Cycle) -> bool {
+    for slot in &cycle.slots {
+        if let CommandSlot::Replay(_) = slot {
+            return true;
+        }
+    }
+    false
+}
+
+pub(super) fn cycle_contains_capture(cycle: &Cycle) -> bool {
+    for slot in &cycle.slots {
+        if let CommandSlot::Capture(_) = slot {
+            return true;
+        }
+    }
+    false
 }

@@ -72,8 +72,8 @@ pub(super) struct DBState {
     pub scratch: Scratch,
 }
 
-#[derive(Clone)]
-pub(super) enum ScratchKind {
+#[derive(Clone, Debug)]
+pub(super) enum MessageKind {
     Parse,
     Bind,
     Describe,
@@ -82,12 +82,13 @@ pub(super) enum ScratchKind {
     Sync,
     Close,
     Terminate,
+    Unknown,
 }
 
 #[derive(Clone)]
 pub(super) struct ScratchEntry {
     pub bytes: Vec<u8>,
-    pub kind: ScratchKind,
+    pub kind: MessageKind,
     pub execute: Option<ExecuteMessageContent>,
 }
 
@@ -213,7 +214,7 @@ pub(super) struct Portal {
     pub result_column_format_codes: Vec<i16>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum ProtocolMode {
     Simple,
     Extended,
@@ -235,11 +236,13 @@ pub(super) enum CommandSlot {
 #[derive(Clone, Debug)]
 pub(super) struct CommandSlotPassthrough {
     pub bytes: Vec<u8>,
+    pub kind: MessageKind,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct CommandSlotSkip {
     pub bytes: Vec<u8>,
+    pub kind: MessageKind,
 }
 
 #[derive(Clone, Debug)]
@@ -261,7 +264,7 @@ pub(super) struct CommandSlotCapture {
     pub ttl: Duration,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum DescribeKind {
     None,
     Portal,

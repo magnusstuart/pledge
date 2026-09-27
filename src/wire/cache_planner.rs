@@ -38,6 +38,18 @@ use super::{
     },
 };
 
+struct PairedMessages {
+    parse_entry: Option<usize>,
+    bind_entry: Option<usize>,
+    // descibe_entry: Option<usize>,
+    query: String,
+}
+
+enum ReplayOrCapture {
+    Replay(CommandSlotReplay),
+    Capture(CommandSlotCapture),
+}
+
 pub(super) fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Arc<CachedResponse>> {
     client_state.app_state.cache.get(key)
 }
@@ -222,9 +234,9 @@ pub(super) fn handle_command_slot_messages(
     command_slots: &[CommandSlot],
 ) -> Result<Vec<u8>, String> {
     let mut complete_byte_stream = Vec::new();
-    let replays_and_captures = replays_and_captures_in_command_slots(command_slots);
+    let replays_or_captures = replays_or_captures_in_command_slots(command_slots);
 
-    if replays_and_captures.replays.is_empty() && replays_and_captures.captures.is_empty() {
+    if replays_or_captures.is_empty() {
         while let Some(next_message) = db_state.framer.next_message()? {
             complete_byte_stream.extend_from_slice(&next_message);
         }
@@ -234,98 +246,79 @@ pub(super) fn handle_command_slot_messages(
     // next_message in the framer, of course something should be done smart about the DataRow and
     // alike, as they can take up A LOT of entries (as many as there was rows returned).
 
-    'capture_loop: for (index, capture) in replays_and_captures.captures {
-        let mut data_to_capture: Vec<u8> = Vec::new();
-        let mut param_desc_to_capture: Vec<u8> = Vec::new();
-        let mut row_desc_to_capture: Vec<u8> = Vec::new();
+    for slot in replays_or_captures {
+        match slot {
+            ReplayOrCapture::Capture(capture) => {
+                let mut data_to_capture: Vec<u8> = Vec::new();
+                let mut param_desc_to_capture: Vec<u8> = Vec::new();
+                let mut row_desc_to_capture: Vec<u8> = Vec::new();
 
-        if capture.protocol_mode == ProtocolMode::Simple {
-            while let Some(next_message) = db_state.framer.next_message()? {
-                match next_message[0] {
-                    b'C' => {
-                        data_to_capture.extend_from_slice(&next_message);
-                        set_in_cache(
-                            &db_state.app_state,
-                            capture.ttl,
-                            &capture.key,
-                            CachedResponse {
-                                param_desc: None,
-                                row_desc: None,
-                                data: data_to_capture.clone(),
-                            },
-                        );
+                if capture.protocol_mode == ProtocolMode::Simple {
+                    while let Some(next_message) = db_state.framer.next_message()? {
+                        match next_message[0] {
+                            b'C' => {
+                                data_to_capture.extend_from_slice(&next_message);
+                                set_in_cache(
+                                    &db_state.app_state,
+                                    capture.ttl,
+                                    &capture.key,
+                                    CachedResponse {
+                                        param_desc: None,
+                                        row_desc: None,
+                                        data: data_to_capture.clone(),
+                                    },
+                                );
+                            }
+                            b'Z' => {
+                                complete_byte_stream.extend_from_slice(&data_to_capture);
+                                complete_byte_stream.extend_from_slice(&next_message);
+                                continue;
+                            }
+                            _ => data_to_capture.extend_from_slice(&next_message),
+                        }
                     }
-                    b'Z' => {
-                        complete_byte_stream.extend_from_slice(&data_to_capture);
-                        complete_byte_stream.extend_from_slice(&next_message);
-                        continue 'capture_loop;
+                } else {
+                    while let Some(next_message) = db_state.framer.next_message()? {
+                        match next_message[0] {
+                            b'C' => {
+                                data_to_capture.extend_from_slice(&next_message);
+                                set_in_cache(
+                                    &db_state.app_state,
+                                    capture.ttl,
+                                    &capture.key,
+                                    CachedResponse {
+                                        param_desc: {
+                                            if capture.describe_kind == DescribeKind::Statement {
+                                                Some(param_desc_to_capture.clone())
+                                            } else {
+                                                None
+                                            }
+                                        },
+                                        row_desc: {
+                                            if capture.describe_kind != DescribeKind::None {
+                                                Some(row_desc_to_capture.clone())
+                                            } else {
+                                                None
+                                            }
+                                        },
+                                        data: data_to_capture.clone(),
+                                    },
+                                );
+                            }
+                            b't' => param_desc_to_capture = next_message.clone(),
+                            b'T' => row_desc_to_capture = next_message.clone(),
+                            b'D' => data_to_capture.extend_from_slice(&next_message),
+                            b'Z' => {
+                                complete_byte_stream.extend_from_slice(&data_to_capture);
+                                complete_byte_stream.extend_from_slice(&next_message);
+                                break;
+                            }
+                            _ => {}
+                        }
                     }
-                    _ => data_to_capture.extend_from_slice(&next_message),
                 }
             }
-        } else {
-            while let Some(next_message) = db_state.framer.next_message()? {
-                match next_message[0] {
-                    b'C' => {
-                        data_to_capture.extend_from_slice(&next_message);
-                        set_in_cache(
-                            &db_state.app_state,
-                            capture.ttl,
-                            &capture.key,
-                            CachedResponse {
-                                param_desc: {
-                                    if capture.describe_kind == DescribeKind::Statement {
-                                        Some(param_desc_to_capture.clone())
-                                    } else {
-                                        None
-                                    }
-                                },
-                                row_desc: {
-                                    if capture.describe_kind != DescribeKind::None {
-                                        Some(row_desc_to_capture.clone())
-                                    } else {
-                                        None
-                                    }
-                                },
-                                data: data_to_capture.clone(),
-                            },
-                        );
-                    }
-                    b't' => param_desc_to_capture = next_message.clone(),
-                    b'T' => row_desc_to_capture = next_message.clone(),
-                    b'D' => data_to_capture.extend_from_slice(&next_message),
-                    b'Z' => {
-                        complete_byte_stream.extend_from_slice(&data_to_capture);
-                        complete_byte_stream.extend_from_slice(&next_message);
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    for (index, command_slot) in command_slots.iter().enumerate() {
-        let next_message = db_state.framer.next_message()?;
-
-        match command_slot {
-            CommandSlot::Passthrough(CommandSlotPassthrough { bytes, kind }) => {}
-            CommandSlot::Skip(CommandSlotSkip { bytes, kind }) => {}
-            CommandSlot::Replay(CommandSlotReplay {
-                key,
-                data,
-                describe_kind,
-                protocol_mode,
-                query,
-            }) => {}
-            CommandSlot::Capture(CommandSlotCapture {
-                bytes,
-                key,
-                describe_kind,
-                protocol_mode,
-                query,
-                ttl,
-            }) => {}
+            ReplayOrCapture::Replay(replay) => {}
         }
     }
 
@@ -454,13 +447,6 @@ fn resolve_execute_chain(client_state: &ClientState, portal_name: &str) -> Optio
         }
     }
     Some(paired_messages)
-}
-
-struct PairedMessages {
-    parse_entry: Option<usize>,
-    bind_entry: Option<usize>,
-    // descibe_entry: Option<usize>,
-    query: String,
 }
 
 async fn sync_message_handle_entries(
@@ -695,27 +681,19 @@ async fn sync_message_handle_entries(
     Ok(command_slots.into_iter().flatten().collect())
 }
 
-struct ReplaysAndCaptures {
-    replays: Vec<(usize, CommandSlotReplay)>,
-    captures: Vec<(usize, CommandSlotCapture)>,
-}
-
-fn replays_and_captures_in_command_slots(command_slots: &[CommandSlot]) -> ReplaysAndCaptures {
-    let mut replays_and_captures = ReplaysAndCaptures {
-        replays: Vec::new(),
-        captures: Vec::new(),
-    };
+fn replays_or_captures_in_command_slots(command_slots: &[CommandSlot]) -> Vec<ReplayOrCapture> {
+    let mut replays_or_captures: Vec<ReplayOrCapture> = Vec::new();
 
     for (index, command_slot) in command_slots.iter().enumerate() {
         if let CommandSlot::Replay(replay) = command_slot {
-            replays_and_captures.replays.push((index, replay.clone()))
+            replays_or_captures.push(ReplayOrCapture::Replay(replay.clone()))
         }
         if let CommandSlot::Capture(capture) = command_slot {
-            replays_and_captures.captures.push((index, capture.clone()))
+            replays_or_captures.push(ReplayOrCapture::Capture(capture.clone()))
         }
     }
 
-    replays_and_captures
+    replays_or_captures
 }
 
 pub(super) fn command_slots_contains_replay_or_capture(command_slots: &[CommandSlot]) -> bool {

@@ -72,7 +72,7 @@ pub(super) struct DBState {
     pub scratch: Scratch,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum MessageKind {
     Parse,
     Bind,

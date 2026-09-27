@@ -48,6 +48,7 @@ struct PairedMessages {
 enum ReplayOrCapture {
     Replay(CommandSlotReplay),
     Capture(CommandSlotCapture),
+    NonCacheConfigured,
 }
 
 pub(super) fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Arc<CachedResponse>> {
@@ -229,6 +230,9 @@ pub(super) async fn find_command_slots(
     Ok(cycles)
 }
 
+// TODO! Add something where if a CommandSlot expects more data, but it isn't in the buffer, then
+// read more data from the TCPStream, it might have gotten split up into multiple streams for
+// various reasons
 pub(super) fn handle_command_slot_messages(
     db_state: &mut DBState,
     command_slots: &[CommandSlot],
@@ -242,12 +246,16 @@ pub(super) fn handle_command_slot_messages(
         }
         return Ok(complete_byte_stream);
     }
-    // Maybe do something where i iterate the command_slots and while doing so i also look at the
-    // next_message in the framer, of course something should be done smart about the DataRow and
-    // alike, as they can take up A LOT of entries (as many as there was rows returned).
-
     for slot in replays_or_captures {
         match slot {
+            ReplayOrCapture::NonCacheConfigured => {
+                while let Some(next_message) = db_state.framer.next_message()? {
+                    complete_byte_stream.extend_from_slice(&next_message);
+                    if next_message[0] == b'C' {
+                        break;
+                    }
+                }
+            }
             ReplayOrCapture::Capture(capture) => {
                 let mut data_to_capture: Vec<u8> = Vec::new();
                 let mut param_desc_to_capture: Vec<u8> = Vec::new();
@@ -272,7 +280,7 @@ pub(super) fn handle_command_slot_messages(
                             b'Z' => {
                                 complete_byte_stream.extend_from_slice(&data_to_capture);
                                 complete_byte_stream.extend_from_slice(&next_message);
-                                continue;
+                                break;
                             }
                             _ => data_to_capture.extend_from_slice(&next_message),
                         }
@@ -318,10 +326,15 @@ pub(super) fn handle_command_slot_messages(
                     }
                 }
             }
-            ReplayOrCapture::Replay(replay) => {}
+            ReplayOrCapture::Replay(replay) => if replay.protocol_mode == ProtocolMode::Simple {},
         }
     }
-
+    while let Some(next_message) = db_state.framer.next_message()? {
+        complete_byte_stream.extend_from_slice(&next_message);
+        if next_message[0] == b'Z' {
+            break;
+        }
+    }
     Ok(complete_byte_stream)
 }
 
@@ -413,6 +426,37 @@ fn cache_data_can_satisfy(response: &CachedResponse, kind: &DescribeKind) -> boo
     }
 }
 
+fn cache_bytes_from_describe_kind(
+    response: &CachedResponse,
+    kind: &DescribeKind,
+) -> Result<Vec<u8>, String> {
+    if kind == &DescribeKind::None {
+        return Ok(response.get_data().clone());
+    }
+
+    let mut data: Vec<u8> = Vec::new();
+    if kind == &DescribeKind::Portal {
+        if let Some(row_desc) = response.get_row_desc() {
+            data.extend_from_slice(&row_desc);
+        } else {
+            return Err("RowDescription not present in cached data".to_string());
+        }
+        data.extend_from_slice(&response.get_data());
+    } else if kind == &DescribeKind::Statement {
+        if let Some(param_desc) = response.get_param_desc() {
+            data.extend_from_slice(&param_desc);
+        } else {
+            return Err("ParameterDescription not present in cached data".to_string());
+        }
+        if let Some(row_desc) = response.get_row_desc() {
+            data.extend_from_slice(&row_desc);
+        } else {
+            return Err("RowDescription not present in cached data".to_string());
+        }
+    }
+
+    Ok(data)
+}
 fn resolve_execute_chain(client_state: &ClientState, portal_name: &str) -> Option<PairedMessages> {
     let mut paired_messages: PairedMessages = PairedMessages {
         parse_entry: None,
@@ -684,12 +728,22 @@ async fn sync_message_handle_entries(
 fn replays_or_captures_in_command_slots(command_slots: &[CommandSlot]) -> Vec<ReplayOrCapture> {
     let mut replays_or_captures: Vec<ReplayOrCapture> = Vec::new();
 
-    for (index, command_slot) in command_slots.iter().enumerate() {
-        if let CommandSlot::Replay(replay) = command_slot {
-            replays_or_captures.push(ReplayOrCapture::Replay(replay.clone()))
-        }
-        if let CommandSlot::Capture(capture) = command_slot {
-            replays_or_captures.push(ReplayOrCapture::Capture(capture.clone()))
+    for command_slot in command_slots {
+        match command_slot {
+            CommandSlot::Passthrough(passthrough) => {
+                if passthrough.kind == MessageKind::Execute
+                    || passthrough.kind == MessageKind::Query
+                {
+                    replays_or_captures.push(ReplayOrCapture::NonCacheConfigured)
+                }
+            }
+            CommandSlot::Replay(replay) => {
+                replays_or_captures.push(ReplayOrCapture::Replay(replay.clone()))
+            }
+            CommandSlot::Capture(capture) => {
+                replays_or_captures.push(ReplayOrCapture::Capture(capture.clone()))
+            }
+            _ => (),
         }
     }
 

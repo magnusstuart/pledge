@@ -6,7 +6,7 @@ use crate::{
         messages::DBMessageContent,
         types::{
             CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay, CommandSlotSkip, Cycle,
-            DescribeKind,
+            DescribeKind, MessageKind,
         },
     },
 };
@@ -26,11 +26,17 @@ pub(super) async fn handle_client(
     client_state: &mut ClientState,
     db_write: &OwnedWriteHalf,
     tx: &Sender<Vec<Cycle>>,
-) {
+) -> Result<(), String> {
     match super::cache_planner::find_command_slots(client_state).await {
         Ok(cycles) => {
             for cycle in &cycles {
+                // TODO! Add graceful shutdown, right now it just goes haywire
                 for slot in &cycle.slots {
+                    if let CommandSlot::Passthrough(passthrough, ..) = slot
+                        && passthrough.kind == MessageKind::Terminate
+                    {
+                        return Err("Connection closed".to_string());
+                    }
                     match slot {
                         CommandSlot::Passthrough(CommandSlotPassthrough { bytes, .. })
                         | CommandSlot::Capture(CommandSlotCapture { bytes, .. }) => {
@@ -57,6 +63,7 @@ pub(super) async fn handle_client(
     let _ = client_state
         .buffer_state
         .consume(&client_state.buffer_state.pending_data_len());
+    Ok(())
 }
 
 pub(super) async fn handle_db(
@@ -65,6 +72,8 @@ pub(super) async fn handle_db(
     client_write: &OwnedWriteHalf,
     db_read: &mut OwnedReadHalf,
 ) -> Result<(), String> {
+    // TODO! Add graceful shutdown, right now it just goes haywire and keeps spamming
+    // this function
     println!("got cycles: {:?}", cycles);
     let _ = db_state.buffer_state.read_from_stream(db_read).await;
     // super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;

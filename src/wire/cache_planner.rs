@@ -13,8 +13,8 @@ use crate::{
     AppState,
     cache::{QueryTemplate, lfu::CachedResponse, store::cache_key_wire},
     wire::{
-        DBState, Decode, MessageFramer, Scratch, data_phase,
-        messages::{Close, CloseMessageContentTarget},
+        ByteReader, DBState, Decode, MessageFramer, Scratch, data_phase,
+        messages::{BindComplete, Close, CloseMessageContentTarget, Encode, ParseComplete},
         types::{
             CachePlan, CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay,
             CommandSlotSkip, Cycle, MessageKind, PreparedStatementState, ScratchEntry,
@@ -46,13 +46,17 @@ struct PairedMessages {
 }
 
 enum ReplayOrCapture {
-    Replay(CommandSlotReplay),
+    Replay {
+        replay_content: CommandSlotReplay,
+        synthesize_parse_complete: bool,
+        synthesize_bind_complete: bool,
+    },
     Capture(CommandSlotCapture),
     NonCacheConfigured,
 }
 
-pub(super) fn get_from_cache(client_state: &ClientState, key: &str) -> Option<Arc<CachedResponse>> {
-    client_state.app_state.cache.get(key)
+pub(super) fn get_from_cache(app_state: &AppState, key: &str) -> Option<Arc<CachedResponse>> {
+    app_state.cache.get(key)
 }
 
 pub(super) fn set_in_cache(app_state: &AppState, ttl: Duration, key: &str, data: CachedResponse) {
@@ -138,7 +142,7 @@ pub(super) async fn find_command_slots(
                         continue;
                     }
                 };
-                match get_from_cache(client_state, &cache_plan.key) {
+                match get_from_cache(&client_state.app_state, &cache_plan.key) {
                     Some(cached_response) => cycles.push(Cycle {
                         slots: vec![CommandSlot::Replay(CommandSlotReplay {
                             data: cached_response,
@@ -217,7 +221,7 @@ pub(super) async fn find_command_slots(
                     })],
                     synthesize_sync: false,
                 });
-                break 'next_message_loop;
+                return Ok(cycles);
             }
             _ => {
                 return Err(Error::new(
@@ -317,6 +321,12 @@ pub(super) fn handle_command_slot_messages(
                             b'T' => row_desc_to_capture = next_message.clone(),
                             b'D' => data_to_capture.extend_from_slice(&next_message),
                             b'Z' => {
+                                if !row_desc_to_capture.is_empty() {
+                                    complete_byte_stream.extend_from_slice(&row_desc_to_capture);
+                                }
+                                if !param_desc_to_capture.is_empty() {
+                                    complete_byte_stream.extend_from_slice(&param_desc_to_capture);
+                                }
                                 complete_byte_stream.extend_from_slice(&data_to_capture);
                                 complete_byte_stream.extend_from_slice(&next_message);
                                 break;
@@ -326,7 +336,29 @@ pub(super) fn handle_command_slot_messages(
                     }
                 }
             }
-            ReplayOrCapture::Replay(replay) => if replay.protocol_mode == ProtocolMode::Simple {},
+            ReplayOrCapture::Replay {
+                replay_content,
+                synthesize_parse_complete,
+                synthesize_bind_complete,
+            } => {
+                if replay_content.protocol_mode == ProtocolMode::Simple {
+                    complete_byte_stream.extend_from_slice(&replay_content.data.get_data());
+                    // This has be to "hardened" in terms of actually representing the true state,
+                    // such as if the we are in a transaction block etc.
+                    complete_byte_stream.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+                } else {
+                    if synthesize_parse_complete {
+                        complete_byte_stream.extend_from_slice(&ParseComplete.encode());
+                    }
+                    if synthesize_bind_complete {
+                        complete_byte_stream.extend_from_slice(&BindComplete.encode());
+                    }
+                    complete_byte_stream.extend_from_slice(&cache_bytes_from_describe_kind(
+                        &replay_content.data,
+                        &replay_content.describe_kind,
+                    )?);
+                }
+            }
         }
     }
     while let Some(next_message) = db_state.framer.next_message()? {
@@ -598,7 +630,7 @@ async fn sync_message_handle_entries(
                         continue;
                     }
                 };
-                let cache_response = get_from_cache(client_state, &cache_plan.key);
+                let cache_response = get_from_cache(&client_state.app_state, &cache_plan.key);
                 let mut describe_kind: DescribeKind = DescribeKind::None;
 
                 match resolve_execute_chain(client_state, &execute_content.name) {
@@ -727,23 +759,35 @@ async fn sync_message_handle_entries(
 
 fn replays_or_captures_in_command_slots(command_slots: &[CommandSlot]) -> Vec<ReplayOrCapture> {
     let mut replays_or_captures: Vec<ReplayOrCapture> = Vec::new();
-
+    let mut skipped_parse = false;
+    let mut skipped_bind = false;
     for command_slot in command_slots {
         match command_slot {
             CommandSlot::Passthrough(passthrough) => {
-                if passthrough.kind == MessageKind::Execute
-                    || passthrough.kind == MessageKind::Query
-                {
+                if passthrough.kind == MessageKind::Execute {
+                    skipped_bind = false;
+                    skipped_parse = false;
+                    replays_or_captures.push(ReplayOrCapture::NonCacheConfigured)
+                } else if passthrough.kind == MessageKind::Query {
                     replays_or_captures.push(ReplayOrCapture::NonCacheConfigured)
                 }
             }
-            CommandSlot::Replay(replay) => {
-                replays_or_captures.push(ReplayOrCapture::Replay(replay.clone()))
-            }
+            CommandSlot::Replay(replay) => replays_or_captures.push(ReplayOrCapture::Replay {
+                replay_content: replay.clone(),
+                synthesize_parse_complete: skipped_parse,
+                synthesize_bind_complete: skipped_bind,
+            }),
             CommandSlot::Capture(capture) => {
                 replays_or_captures.push(ReplayOrCapture::Capture(capture.clone()))
             }
-            _ => (),
+            CommandSlot::Skip(skip) => {
+                if skip.kind == MessageKind::Parse {
+                    skipped_parse = true
+                }
+                if skip.kind == MessageKind::Bind {
+                    skipped_bind = true
+                }
+            }
         }
     }
 

@@ -116,7 +116,10 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
                 }
             };
 
-            data_phase::handle_client(&mut client_state, &db_write, &tx).await;
+            if let Err(error) = data_phase::handle_client(&mut client_state, &db_write, &tx).await {
+                eprintln!("{}", error);
+                break;
+            }
         }
         return;
     });

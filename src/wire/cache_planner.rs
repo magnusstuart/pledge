@@ -544,145 +544,20 @@ async fn sync_message_handle_entries(client_state: &mut ClientState) -> Result<C
             MessageKind::Describe => apply_describe(entry, index, client_state).await?,
             MessageKind::Close => apply_close(entry, client_state).await?,
             MessageKind::Execute => {
-                let body = entry.bytes[5..].to_vec();
-                let execute_content = match (Execute { bytes: body }).decode() {
-                    Ok(decoded) => decoded,
-                    Err(e) => {
-                        return Err(Error::new(std::io::ErrorKind::Other, e.message));
-                    }
-                };
-
-                let cache_plan = {
-                    if execute_content.rows_to_return_limit == 0 {
-                        match find_template(&execute_content, client_state) {
-                            Some(cache_plan) => cache_plan,
-                            None => {
-                                command_slots[index] =
-                                    Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                                        bytes: entry.bytes.clone(),
-                                        kind: entry.kind.clone(),
-                                    }));
-                                continue;
-                            }
-                        }
-                    } else {
-                        command_slots[index] =
-                            Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                                bytes: entry.bytes.clone(),
-                                kind: entry.kind.clone(),
-                            }));
-                        continue;
-                    }
-                };
-                let cache_response = get_from_cache(&client_state.app_state, &cache_plan.key);
-                let mut describe_kind: DescribeKind = DescribeKind::None;
-
-                match resolve_execute_chain(client_state, &execute_content.name) {
-                    Some(paired_messages) => {
-                        // We do this check for the describe_kind now, as we need it to see whether
-                        // the data we (possibly) have cached is complete/contains what is needed
-                        if let Some((_, describe)) = client_state
-                            .scratch
-                            .describes_by_name
-                            .get(&execute_content.name)
-                        {
-                            describe_kind = describe_message(describe);
-                        }
-                        if let Some(cached) = cache_response
-                            && cache_data_can_satisfy(&cached, &describe_kind)
-                        {
-                            if let Some((describe_index, _)) = client_state
-                                .scratch
-                                .describes_by_name
-                                .get(&execute_content.name)
-                                && let Some(entry) =
-                                    client_state.scratch.entries.get(*describe_index)
-                            {
-                                command_slots[*describe_index] =
-                                    Some(CommandSlot::Skip(CommandSlotSkip {
-                                        bytes: entry.bytes.clone(),
-                                        kind: MessageKind::Describe,
-                                    }));
-                            };
-                            command_slots[index] = Some(CommandSlot::Replay(CommandSlotReplay {
-                                key: cache_plan.key,
-                                describe_kind,
-                                protocol_mode: ProtocolMode::Extended,
-                                query: paired_messages.query,
-                                data: cached,
-                            }));
-                            if let Some(bind_index) = paired_messages.bind_entry
-                                && let Some(entry) = client_state.scratch.entries.get(bind_index)
-                            {
-                                command_slots[bind_index] =
-                                    Some(CommandSlot::Skip(CommandSlotSkip {
-                                        bytes: entry.bytes.clone(),
-                                        kind: MessageKind::Bind,
-                                    }))
-                            }
-                            if let Some(parse_index) = paired_messages.parse_entry
-                                && let Some(entry) = client_state.scratch.entries.get(parse_index)
-                            {
-                                command_slots[parse_index] =
-                                    Some(CommandSlot::Skip(CommandSlotSkip {
-                                        bytes: entry.bytes.clone(),
-                                        kind: MessageKind::Parse,
-                                    }))
-                            }
-                        } else {
-                            if let Some((describe_index, _)) = client_state
-                                .scratch
-                                .describes_by_name
-                                .get(&execute_content.name)
-                                && let Some(entry) =
-                                    client_state.scratch.entries.get(*describe_index)
-                            {
-                                command_slots[*describe_index] =
-                                    Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                                        bytes: entry.bytes.clone(),
-                                        kind: MessageKind::Describe,
-                                    }))
-                            }
-                            command_slots[index] = Some(CommandSlot::Capture(CommandSlotCapture {
-                                bytes: entry.bytes.clone(),
-                                key: cache_plan.key,
-                                describe_kind,
-                                protocol_mode: ProtocolMode::Extended,
-                                query: paired_messages.query,
-                                ttl: cache_plan.ttl,
-                            }));
-
-                            if let Some(bind_index) = paired_messages.bind_entry
-                                && let Some(entry) = client_state.scratch.entries.get(bind_index)
-                            {
-                                command_slots[bind_index] =
-                                    Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                                        bytes: entry.bytes.clone(),
-                                        kind: MessageKind::Bind,
-                                    }))
-                            }
-                            if let Some(parse_index) = paired_messages.parse_entry
-                                && let Some(entry) = client_state.scratch.entries.get(parse_index)
-                            {
-                                command_slots[parse_index] =
-                                    Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                                        bytes: entry.bytes.clone(),
-                                        kind: MessageKind::Parse,
-                                    }))
-                            }
-                        }
-                    }
-                    None => {
-                        // TODO! add proper logging when this happens, as it shouldn't really be
-                        // able to happen
-                        command_slots[index] =
-                            Some(CommandSlot::Passthrough(CommandSlotPassthrough {
-                                bytes: entry.bytes.clone(),
-                                kind: entry.kind.clone(),
-                            }));
-                    }
+                let execute_plan = plan_execute(entry, client_state).await;
+                command_slots[index] = Some(execute_plan.execute_slot);
+                for (index, slot) in [
+                    execute_plan.describe_slot,
+                    execute_plan.bind_slot,
+                    execute_plan.parse_slot,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    command_slots[index] = Some(slot);
                 }
             }
+
             MessageKind::Sync => {
                 synthesize_sync = false;
             }
@@ -966,7 +841,13 @@ async fn plan_execute(entry: &ScratchEntry, client_state: &mut ClientState) -> E
                 }
             }
         }
-        None => return execute_plan,
+        None => {
+            eprintln!(
+                "execute chain unresolved for portal '{}', falling back to passthrough",
+                execute_content.name
+            );
+            return execute_plan;
+        }
     }
 
     execute_plan

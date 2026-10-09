@@ -121,22 +121,22 @@ async fn spawn_tasks(client_stream: TcpStream, db_stream: TcpStream, app_state: 
                 break;
             }
         }
-        return;
     });
 
     let db_spawn = tokio::spawn(async move {
         loop {
-            if let Some(command_slots) = rx.recv().await {
-                if let Err(e) =
+            if let Some(command_slots) = rx.recv().await
+                && let Err(e) =
                     data_phase::handle_db(command_slots, &mut db_state, &client_write, &mut db_read)
                         .await
-                {
-                    eprintln!("cache handling failed: {e}");
-                    break;
-                }
+            {
+                eprintln!("cache handling failed: {e}");
+                break;
             }
         }
     });
+
+    // TODO! Something with proper shutdown of the handles
     let handles = tokio::join!(client_spawn, db_spawn);
 }
 

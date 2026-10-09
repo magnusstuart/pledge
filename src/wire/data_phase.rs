@@ -6,7 +6,7 @@ use crate::{
         messages::DBMessageContent,
         types::{
             CommandSlotCapture, CommandSlotPassthrough, CommandSlotReplay, CommandSlotSkip, Cycle,
-            DescribeKind, MessageKind,
+            DescribeKind, MessageKind, ProtocolMode,
         },
     },
 };
@@ -29,6 +29,7 @@ pub(super) async fn handle_client(
 ) -> Result<(), String> {
     match super::cache_planner::find_command_slots(client_state).await {
         Ok(cycles) => {
+            println!("This amount of cycles were found: {}", cycles.len());
             for cycle in &cycles {
                 // TODO! Add graceful shutdown, right now it just goes haywire
                 for slot in &cycle.slots {
@@ -42,14 +43,13 @@ pub(super) async fn handle_client(
                         | CommandSlot::Capture(CommandSlotCapture { bytes, .. }) => {
                             super::stream_try_write(db_write, bytes).await;
                         }
-                        _ => {}
+                        _ => (),
                     }
                 }
-                if cycle.synthesize_sync {
+                if cycle.needs_db && cycle.protocol_mode == ProtocolMode::Extended {
                     super::stream_try_write(db_write, &[b'S', 0, 0, 0, 4]).await;
                 }
             }
-
             if let Err(err) = tx.send(cycles).await {
                 // TODO! Either add a retry, or just terminate program
                 eprintln!("failed to send command slots: {err}");
@@ -74,20 +74,27 @@ pub(super) async fn handle_db(
 ) -> Result<(), String> {
     // TODO! Add graceful shutdown, right now it just goes haywire and keeps spamming
     // this function
-    println!("got cycles: {:?}", cycles);
-    let _ = db_state.buffer_state.read_from_stream(db_read).await;
-    // super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
-    db_state
-        .framer
-        .add_buffer(db_state.buffer_state.pending_data());
-    let _ = db_state
-        .buffer_state
-        .consume(&db_state.buffer_state.pending_data_len());
+    // println!("got cycles: {:?}", cycles);
 
     for cycle in &cycles {
+        println!(
+            "Going through the cycles, there are {} cycles, the cycle needs_db {}, and uses the {:#?} protocol_mode",
+            cycles.len(),
+            cycle.needs_db,
+            cycle.protocol_mode
+        );
+        if cycle.needs_db {
+            let _ = db_state.buffer_state.read_from_stream(db_read).await;
+            db_state
+                .framer
+                .add_buffer(db_state.buffer_state.pending_data());
+            let _ = db_state
+                .buffer_state
+                .consume(&db_state.buffer_state.pending_data_len());
+        }
         super::stream_try_write(
             client_write,
-            &super::cache_planner::handle_command_slot_messages(db_state, &cycle.slots)?,
+            &super::cache_planner::handle_command_slot_messages(db_state, cycle)?,
         )
         .await;
     }

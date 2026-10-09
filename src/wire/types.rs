@@ -89,7 +89,6 @@ pub(super) enum MessageKind {
 pub(super) struct ScratchEntry {
     pub bytes: Vec<u8>,
     pub kind: MessageKind,
-    pub execute: Option<ExecuteMessageContent>,
 }
 
 pub(super) struct Scratch {
@@ -223,14 +222,22 @@ pub(super) enum ProtocolMode {
 #[derive(Clone, Debug)]
 pub(super) struct Cycle {
     pub slots: Vec<CommandSlot>,
-    pub synthesize_sync: bool,
+    pub needs_db: bool,
+    pub protocol_mode: ProtocolMode,
 }
+
 #[derive(Clone, Debug)]
 pub(super) enum CommandSlot {
     Passthrough(CommandSlotPassthrough), // not configured: clean passthrough to the db
     Skip(CommandSlotSkip),
     Replay(CommandSlotReplay), // cache hit: write these to client, skip DB
     Capture(CommandSlotCapture), // cache miss: next DB response belongs to this key
+}
+
+impl CommandSlot {
+    pub fn needs_db(&self) -> bool {
+        matches!(self, CommandSlot::Passthrough(_) | CommandSlot::Capture(_))
+    }
 }
 
 #[derive(Clone, Debug)]

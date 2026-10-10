@@ -374,7 +374,7 @@ pub(super) fn handle_command_slot_messages(
             break;
         }
     }
-    if !cycle.needs_db && cycle.protocol_mode == ProtocolMode::Extended {
+    if !cycle.needs_db {
         println!("Synthesizing the Ready For Query");
         // this has be to "hardened" in terms of actually representing the true state,
         // such as if the we are in a transaction block etc.

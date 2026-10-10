@@ -25,6 +25,7 @@ mod data_phase;
 mod message_framer;
 mod messages;
 mod reader;
+mod response_handler;
 mod startup_phase;
 pub mod types;
 mod writer;

@@ -94,27 +94,27 @@ pub(super) async fn handle_db(
         }
         super::stream_try_write(
             client_write,
-            &super::cache_planner::handle_command_slot_messages(db_state, cycle)?,
+            &super::response_handler::handle_command_slot_messages(db_state, cycle)?,
         )
         .await;
     }
     Ok(())
 }
 
-pub(super) async fn handle_db_read(
-    db_state: &mut DBState,
-    client_write: &OwnedWriteHalf,
-) -> Result<(), String> {
-    super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
-    if let Err(err) = db_state
-        .buffer_state
-        .consume(&db_state.buffer_state.pending_data_len())
-    {
-        eprintln!("Error occurred: {}", err);
-        return Err(err.to_string());
-    }
-    Ok(())
-}
+// pub(super) async fn handle_db_read(
+//     db_state: &mut DBState,
+//     client_write: &OwnedWriteHalf,
+// ) -> Result<(), String> {
+//     super::stream_try_write(client_write, db_state.buffer_state.pending_data()).await;
+//     if let Err(err) = db_state
+//         .buffer_state
+//         .consume(&db_state.buffer_state.pending_data_len())
+//     {
+//         eprintln!("Error occurred: {}", err);
+//         return Err(err.to_string());
+//     }
+//     Ok(())
+// }
 
 // pub(super) async fn handle_db_cache_command(
 //     cycles: Vec<Cycle>,

@@ -9,7 +9,7 @@ database = "pledge"
 
 [cache]
 global_ttl = 30
-max_size_mib = 10
+max_size_mib = 1000
 
 [server]
 port = 3000
@@ -62,6 +62,11 @@ ttl = 30
 [[queries]]
 name = "search_users_by_content_limit_1000"
 sql = "SELECT u.email, COUNT(*) as match_count, MAX(p.created_at) as latest_match FROM users u JOIN posts p ON u.id = p.user_id WHERE p.content ILIKE $1 OR p.content ILIKE $2 OR p.title ILIKE $3 GROUP BY u.email ORDER BY match_count DESC LIMIT 1000"
+ttl = 600
+
+[[queries]]
+name = "search_users_by_content_limit_50000"
+sql = "SELECT u.email, COUNT(*) as match_count, MAX(p.created_at) as latest_match FROM users u JOIN posts p ON u.id = p.user_id WHERE p.content ILIKE $1 OR p.content ILIKE $2 OR p.title ILIKE $3 GROUP BY u.email ORDER BY match_count DESC LIMIT 50000"
 ttl = 600
 
 [[queries]]

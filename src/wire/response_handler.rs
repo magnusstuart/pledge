@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use tokio::net::tcp::OwnedReadHalf;
+
 use crate::{
     AppState,
     cache::lfu::CachedResponse,
@@ -29,15 +31,59 @@ pub(super) fn set_in_cache(app_state: &AppState, ttl: Duration, key: &str, data:
         .insert(key.to_string(), data, Instant::now() + ttl);
 }
 
-// TODO! Add something where if a CommandSlot expects more data, but it isn't in the buffer, then
-// read more data from the TCPStream, it might have gotten split up into multiple streams for
-// various reasons
-pub(super) fn handle_command_slot_messages(
+async fn next_message_from_stream(
     db_state: &mut DBState,
+    db_read: &mut OwnedReadHalf,
+) -> Result<Option<Vec<u8>>, String> {
+    loop {
+        let next_message = db_state.framer.next_message()?;
+        match next_message {
+            None => {
+                println!("Checking if there's unread bytes in the stream");
+                let read_bytes = match db_state.buffer_state.read_from_stream(db_read).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => break Err(error.to_string()),
+                };
+                if read_bytes == 0 {
+                    println!("Stream has been read completely (so far)");
+                    break Ok(None);
+                }
+                println!("There were more bytes in the stream");
+                db_state
+                    .framer
+                    .add_buffer(db_state.buffer_state.pending_data());
+                if let Err(error) = db_state
+                    .buffer_state
+                    .consume(&db_state.buffer_state.pending_data_len())
+                {
+                    break Err(error.to_string());
+                }
+            }
+            Some(message) => break Ok(Some(message)),
+        }
+    }
+}
+
+pub(super) async fn handle_command_slot_messages(
+    db_state: &mut DBState,
+    db_read: &mut OwnedReadHalf,
     cycle: &Cycle,
 ) -> Result<Vec<u8>, String> {
-    let mut complete_byte_stream = Vec::new();
+    // let mut complete_byte_stream = Vec::new();
     let replays_or_captures = replays_or_captures_in_command_slots(&cycle.slots);
+
+    let estimated_size: usize = replays_or_captures
+        .iter()
+        .map(|slot| match slot {
+            ReplayOrCapture::Replay { replay_content, .. } => {
+                replay_content.data.data.len()
+                    + replay_content.data.param_desc.as_ref().map_or(0, Vec::len)
+                    + replay_content.data.row_desc.as_ref().map_or(0, Vec::len)
+            }
+            _ => 0, // We have no idea what size non replays are, so we just underallocate.
+        })
+        .sum();
+    let mut complete_byte_stream = Vec::with_capacity(estimated_size);
 
     if replays_or_captures.is_empty() {
         println!("No replays_or_captures_in_command_slots");
@@ -46,10 +92,11 @@ pub(super) fn handle_command_slot_messages(
         }
         return Ok(complete_byte_stream);
     }
+
     for slot in replays_or_captures {
         match slot {
             ReplayOrCapture::NonCacheConfigured => {
-                while let Some(next_message) = db_state.framer.next_message()? {
+                while let Some(next_message) = next_message_from_stream(db_state, db_read).await? {
                     complete_byte_stream.extend_from_slice(&next_message);
                     if next_message[0] == b'C' {
                         break;
@@ -57,7 +104,8 @@ pub(super) fn handle_command_slot_messages(
                 }
             }
             ReplayOrCapture::Capture(capture) => {
-                handle_capture_command_slot(db_state, capture, &mut complete_byte_stream)?
+                handle_capture_command_slot(db_state, db_read, capture, &mut complete_byte_stream)
+                    .await?
             }
             ReplayOrCapture::Replay {
                 replay_content,
@@ -79,15 +127,16 @@ pub(super) fn handle_command_slot_messages(
     }
     if !cycle.needs_db {
         println!("Synthesizing the Ready For Query");
-        // this has be to "hardened" in terms of actually representing the true state,
+        // TODO! this has be to "hardened" in terms of actually representing the true state,
         // such as if the we are in a transaction block etc.
         complete_byte_stream.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
     }
     Ok(complete_byte_stream)
 }
 
-fn handle_capture_command_slot(
+async fn handle_capture_command_slot(
     db_state: &mut DBState,
+    db_read: &mut OwnedReadHalf,
     capture: CommandSlotCapture,
     complete_byte_stream: &mut Vec<u8>,
 ) -> Result<(), String> {
@@ -96,7 +145,7 @@ fn handle_capture_command_slot(
     let mut row_desc_to_capture: Vec<u8> = Vec::new();
 
     if capture.protocol_mode == ProtocolMode::Simple {
-        while let Some(next_message) = db_state.framer.next_message()? {
+        while let Some(next_message) = next_message_from_stream(db_state, db_read).await? {
             match next_message[0] {
                 b'C' => {
                     data_to_capture.extend_from_slice(&next_message);
@@ -124,7 +173,7 @@ fn handle_capture_command_slot(
             }
         }
     } else {
-        while let Some(next_message) = db_state.framer.next_message()? {
+        while let Some(next_message) = next_message_from_stream(db_state, db_read).await? {
             match next_message[0] {
                 b'C' => {
                     data_to_capture.extend_from_slice(&next_message);
@@ -188,7 +237,7 @@ fn handle_replay_command_slot(
 ) -> Result<(), String> {
     println!("Replaying a {:?} message", replay_content.protocol_mode);
     if replay_content.protocol_mode == ProtocolMode::Simple {
-        complete_byte_stream.extend_from_slice(&replay_content.data.get_data());
+        complete_byte_stream.extend_from_slice(&replay_content.data.data);
     } else {
         if synthesize_parse_complete {
             complete_byte_stream.extend_from_slice(&ParseComplete.encode());
@@ -196,10 +245,11 @@ fn handle_replay_command_slot(
         if synthesize_bind_complete {
             complete_byte_stream.extend_from_slice(&BindComplete.encode());
         }
-        complete_byte_stream.extend_from_slice(&cache_bytes_from_describe_kind(
+        cache_bytes_from_describe_kind(
             &replay_content.data,
             &replay_content.describe_kind,
-        )?);
+            complete_byte_stream,
+        )?;
     }
     Ok(())
 }
@@ -207,33 +257,32 @@ fn handle_replay_command_slot(
 fn cache_bytes_from_describe_kind(
     response: &CachedResponse,
     kind: &DescribeKind,
-) -> Result<Vec<u8>, String> {
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
     if kind == &DescribeKind::None {
-        return Ok(response.get_data().clone());
+        out.extend_from_slice(&response.data);
+        return Ok(());
     }
 
-    let mut data: Vec<u8> = Vec::new();
     if kind == &DescribeKind::Portal {
-        if let Some(row_desc) = response.get_row_desc() {
-            data.extend_from_slice(&row_desc);
-        } else {
-            return Err("RowDescription not present in cached data".to_string());
+        match response.row_desc.as_ref() {
+            Some(row_desc) => out.extend_from_slice(row_desc),
+            None => return Err("RowDescription not present in cached data".to_string()),
         }
-        data.extend_from_slice(&response.get_data());
+        out.extend_from_slice(&response.data);
     } else if kind == &DescribeKind::Statement {
-        if let Some(param_desc) = response.get_param_desc() {
-            data.extend_from_slice(&param_desc);
-        } else {
-            return Err("ParameterDescription not present in cached data".to_string());
-        }
-        if let Some(row_desc) = response.get_row_desc() {
-            data.extend_from_slice(&row_desc);
-        } else {
-            return Err("RowDescription not present in cached data".to_string());
-        }
+        let param_desc = response
+            .param_desc
+            .as_ref()
+            .ok_or_else(|| "ParameterDescription not present in cached data".to_string())?;
+        let row_desc = response
+            .row_desc
+            .as_ref()
+            .ok_or_else(|| "RowDescription not present in cached data".to_string())?;
+        out.extend_from_slice(param_desc);
+        out.extend_from_slice(row_desc);
     }
-
-    Ok(data)
+    Ok(())
 }
 
 fn replays_or_captures_in_command_slots(command_slots: &[CommandSlot]) -> Vec<ReplayOrCapture> {

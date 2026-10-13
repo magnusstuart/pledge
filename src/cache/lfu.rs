@@ -129,6 +129,7 @@ impl CacheInner {
         };
         let entry_size = entry.get_size(&key);
         if entry_size > self.max_size_bytes {
+            println!("Entry is too big for the cache, dropping it");
             return;
         } // too big, drop it
         self.remove(&key);
@@ -182,19 +183,10 @@ impl CachedResponse {
     pub fn has_data(&self) -> bool {
         !self.data.is_empty()
     }
-    pub fn get_data(&self) -> Vec<u8> {
-        self.data.clone()
-    }
     pub fn has_row_desc(&self) -> bool {
         self.row_desc.is_some()
     }
-    pub fn get_row_desc(&self) -> Option<Vec<u8>> {
-        self.row_desc.clone()
-    }
     pub fn has_param_desc(&self) -> bool {
         self.param_desc.is_some()
-    }
-    pub fn get_param_desc(&self) -> Option<Vec<u8>> {
-        self.param_desc.clone()
     }
 }

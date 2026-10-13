@@ -296,12 +296,9 @@ fn resolve_execute_chain(client_state: &ClientState, portal_name: &str) -> Optio
 
     let mut prepared_statement_name: Option<String> = None;
 
-    match client_state.scratch.describes_by_name.get(portal_name) {
-        Some((index, describe)) => {
-            paired_messages.describe_entry = Some(*index);
-            paired_messages.describe_kind = describe_message(describe);
-        }
-        None => (),
+    if let Some((index, describe)) = client_state.scratch.describes_by_name.get(portal_name) {
+        paired_messages.describe_entry = Some(*index);
+        paired_messages.describe_kind = describe_message(describe);
     }
 
     match client_state.scratch.binds_by_portal_name.get(portal_name) {

@@ -137,6 +137,7 @@ impl BufferState {
         self.write_cursor += read;
         Ok(read)
     }
+
     pub fn compact(&mut self) {
         if self.read_cursor > 0 {
             self.buffer
@@ -163,10 +164,10 @@ impl BufferState {
         let mut writer = ByteWriter::new(&mut buffer, 0);
         writer.trim_from_pending_commands(replay_trim);
 
-        if writer.get_buffer().len() > 0 {
+        if !writer.get_buffer().is_empty() {
             return Some(buffer);
         }
-        return None;
+        None
     }
 
     pub fn consume(&mut self, n: &usize) -> Result<(), Error> {

@@ -2,27 +2,40 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum_server::tls_rustls::RustlsConfig;
 use tokio::task::JoinHandle;
 
-use crate::AppState;
 use crate::config::ServerConfig;
-use crate::handlers::{health::health_handler, metrics::metrics_handler, query::query_handler};
+use crate::handlers::{health::health_handler, metrics::metrics_handler};
+use crate::{AppState, wire};
 pub mod state;
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
-        .route("/query", post(query_handler))
         .route("/metrics", get(metrics_handler))
         .with_state(state)
 }
 
 pub async fn run_server(server_config: &ServerConfig, state: AppState) {
-    let routes = create_router(state);
+    let routes = create_router(state.clone());
     let cloned_routes = routes.clone();
     let port = server_config.port;
+
+    tokio::spawn(async move {
+        let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", 1337)).await {
+            Ok(listener) => {
+                println!("Server listening on HTTP on port {}", 1337);
+                listener
+            }
+            Err(err) => {
+                eprintln!("Failed to bind to port {}: {}", 1337, err);
+                return;
+            }
+        };
+        wire::listener_start(listener, &state).await
+    });
 
     let http_handle = tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {

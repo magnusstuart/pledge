@@ -1,9 +1,10 @@
+use super::QueryTemplate;
 use std::collections::HashMap;
 
 use crate::config::Config;
 
 pub struct QueryMatcher {
-    templates: HashMap<String, super::QueryTemplate>,
+    templates: HashMap<String, QueryTemplate>,
 }
 
 impl QueryMatcher {
@@ -15,7 +16,7 @@ impl QueryMatcher {
         QueryMatcher { templates }
     }
 
-    pub fn find_template(&self, sql: &str) -> Option<&super::QueryTemplate> {
+    pub fn find_template(&self, sql: &str) -> Option<&QueryTemplate> {
         self.templates.get(sql)
     }
 

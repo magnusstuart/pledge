@@ -1,4 +1,3 @@
-use sqlx::postgres::PgPoolOptions;
 use std::{sync::Arc, time::Duration};
 
 mod cache;
@@ -7,6 +6,7 @@ mod database;
 mod handlers;
 mod metrics;
 mod server;
+mod wire;
 pub use cache::matcher::QueryMatcher;
 pub use server::state::AppState;
 
@@ -18,14 +18,6 @@ use crate::{
 #[tokio::main]
 async fn main() {
     let config = config::load_config().expect("Failed to load config");
-    let pool = Arc::new(
-        PgPoolOptions::new()
-            .max_connections(10)
-            .acquire_timeout(Duration::from_secs(60))
-            .connect(&config.database.url)
-            .await
-            .expect("Failed to connect to database"),
-    );
     let matcher = Arc::new(QueryMatcher::new(&config));
 
     let cache_config = config.cache.get_cache_settings();
@@ -63,10 +55,10 @@ async fn main() {
     });
 
     let state = AppState {
-        pool,
         matcher,
         cache,
         global_ttl: cache_config.global_ttl,
+        database_config: config.database,
     };
 
     server::run_server(&config.server, state).await;

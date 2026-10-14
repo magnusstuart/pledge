@@ -2,7 +2,6 @@ use std::{sync::Arc, time::Duration};
 
 mod cache;
 mod config;
-mod database;
 mod handlers;
 mod metrics;
 mod server;

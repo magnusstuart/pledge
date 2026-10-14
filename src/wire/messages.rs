@@ -4,7 +4,6 @@ use super::{reader::ByteReaderErrorKind, types::ColumnMetadata};
 
 use super::reader::{ByteReader, ByteReaderError};
 use bytes::{BufMut, BytesMut};
-use sqlx::{Row, postgres::PgRow};
 
 use super::SQLCommand;
 
@@ -67,39 +66,6 @@ impl<'a> Encode for RowDescription<'a> {
         bytes.put_u8(b'T');
         bytes.put_i32((payload.len() + 6) as i32); // Length of message
         bytes.put_i16(self.columns.len() as i16); // Number of columns
-        bytes.put(payload);
-        bytes.to_vec()
-    }
-}
-
-pub(super) struct DataRow<'a> {
-    pub(super) row: &'a PgRow,
-}
-impl<'a> Encode for DataRow<'a> {
-    fn encode(&self) -> Vec<u8> {
-        let mut payload = BytesMut::new();
-        for index in 0..(self.row.columns().len()) {
-            let row_value = match self.row.try_get_raw(index) {
-                Ok(pg_value_ref) => match pg_value_ref.as_bytes() {
-                    Ok(value) => Some(value),
-                    Err(_) => None,
-                },
-                Err(_) => None,
-            };
-            match row_value {
-                Some(row_value) => {
-                    println!("row value: {:?}", row_value);
-                    payload.put_i32(row_value.len() as i32);
-                    payload.put(row_value);
-                }
-                None => payload.put_i32(-1),
-            }
-        }
-
-        let mut bytes = BytesMut::new();
-        bytes.put_u8(b'D');
-        bytes.put_i32((payload.len() + 6) as i32); // Length of message
-        bytes.put_i16(self.row.len() as i16);
         bytes.put(payload);
         bytes.to_vec()
     }
